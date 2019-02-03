@@ -4,23 +4,23 @@ powa-remote main application.
 
 from powa_remote.options import parse_options
 from powa_remote.powa_worker import PowaThread
+import psycopg2
 import time
 import logging
 import signal
 
 __VERSION__ = '0.0.1'
-__VERSION_NUM__ =[int(part) for part in __VERSION__.split('.')]
+__VERSION_NUM__ = [int(part) for part in __VERSION__.split('.')]
 
-from powa_remote.options import parse_options
 
 class PowaRemote():
-    def __init__(self, loglevel = logging.INFO):
+    def __init__(self, loglevel=logging.INFO):
         self.workers = {}
         self.logger = logging.getLogger("powa-remote")
-        self.stopping = False;
+        self.stopping = False
 
         extra = {'threadname': '-'}
-        logging.basicConfig(format='%(asctime)s %(threadname)s: %(message)s ', level=loglevel)
+        logging.basicConfig(format='%(asctime)s %(threadname)s %(levelname)-6s: %(message)s ', level=loglevel)
         self.logger = logging.LoggerAdapter(self.logger, extra)
         signal.signal(signal.SIGHUP, self.sighandler)
         signal.signal(signal.SIGTERM, self.sighandler)
@@ -29,7 +29,40 @@ class PowaRemote():
         self.config = parse_options()
         self.logger.info("Starting powa-remote...")
 
+        try:
+            self.logger.debug("Connecting on repository...")
+            self.__repo_conn = psycopg2.connect(self.config["repository"]['dsn'])
+            self.logger.debug("Connected.")
+        except psycopg2.Error as e:
+            self.logger.error("Error connecting:\n%s", e)
+            exit(1)
+
+        self.config["servers"] = {}
+        cur = self.__repo_conn.cursor()
+        cur.execute("""
+                    SELECT id, hostname, port, user, password, dbname,
+                        frequency
+                    FROM powa_servers s
+                    WHERE s.id > 0
+                """)
+
+        for row in cur:
+            parms = {}
+            parms["host"] = row[1]
+            parms["port"] = row[2]
+            parms["user"] = row[3]
+            if (row[4] is not None):
+                parms["password"] = row[4]
+            parms["dbname"] = row[5]
+
+            key = row[1] + ':' + str(row[2])
+            self.config["servers"][key] = {}
+            self.config["servers"][key]["dsn"] = parms
+            self.config["servers"][key]["frequency"] = row[6]
+            self.config["servers"][key]["srvid"] = row[0]
+
         for k, conf in self.config["servers"].items():
+            self.logger.debug(conf)
             self.register_worker(k, self.config["repository"], conf)
 
         try:
